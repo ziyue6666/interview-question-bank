@@ -21,4 +21,4 @@ if sys.platform=='darwin':
     subprocess.run(['codesign','--force','--deep','--sign','-',str(bundle)],check=True)
 (root/(name+'.spec')).unlink(missing_ok=True)
 shutil.rmtree(root/'build',ignore_errors=True)
-print(bundle)
+print('Build complete')
