@@ -30,8 +30,9 @@ class AppTests(unittest.TestCase):
         with self.app.db() as c:
             self.assertEqual(self.app.one(c,'SELECT COUNT(*) n FROM groups')['n'],40)
         self.assertEqual(self.client.get('/api/setup/status').status_code,200)
-        self.assertEqual(self.client.get('/api/banks/network/groups').status_code,403)
-        self.assertEqual(self.client.post('/api/practice/draw').status_code,403)
+        with patch.object(self.app,'key_get',return_value=''):
+            self.assertEqual(self.client.get('/api/banks/network/groups').status_code,403)
+            self.assertEqual(self.client.post('/api/practice/draw').status_code,403)
         with patch.object(self.app,'key_get',return_value='fake'):
             self.assertEqual(self.client.get('/api/banks/network/groups').json()['total'],40)
             self.assertEqual(self.client.post('/api/resume/skip').status_code,200)
