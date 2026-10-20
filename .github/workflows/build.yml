@@ -1,0 +1,37 @@
+name: Build and test local installers
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '*.py'
+      - 'static/**'
+      - 'seeds/**'
+      - 'packaging/**'
+      - 'requirements.txt'
+      - '.github/workflows/build.yml'
+jobs:
+  bundle:
+    strategy:
+      matrix:
+        include:
+          - os: macos-15
+            label: macOS-arm64
+          - os: macos-15-intel
+            label: macOS-Intel
+          - os: windows-2025
+            label: Windows-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt pyinstaller httpx
+      - run: python packaging/audit.py
+      - run: python -m unittest discover -s tests
+      - run: python packaging/build.py
+      - run: python packaging/audit.py dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.label }}
+          path: dist/

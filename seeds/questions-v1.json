@@ -1,0 +1,282 @@
+[
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "Java 高频八股",
+    "question": "HashMap 为什么不是线程安全的？并发写入如何处理？",
+    "answer": "HashMap 的 put、扩容没有同步保证，并发修改可能丢失更新或产生不一致。并发读写可用 ConcurrentHashMap；若需跨多个操作保持原子性，仍要额外加锁或设计事务。不要把 synchronizedMap 的单次方法同步误当成复合操作原子性。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "Java 高频八股",
+    "question": "HashMap 的 hash 定位和扩容过程是什么？",
+    "answer": "先将 key 的 hash 扰动，再按 (容量-1)&hash 定位桶；冲突时链表或树节点存放。容量超过负载阈值时通常扩容为 2 倍并迁移元素。JDK 8 中链表树化有容量与节点数条件；不同 JDK 实现细节可变。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "Java 高频八股",
+    "question": "ArrayList 与 LinkedList 如何选择？",
+    "answer": "ArrayList 基于连续数组，随机访问快，尾部追加通常摊销 O(1)，中间插删要移动元素。LinkedList 为双向链表，已持有节点时插删快，但按索引定位 O(n)，还有节点内存开销。多数顺序遍历和按索引访问场景优先 ArrayList。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "Java 高频八股",
+    "question": "equals 与 hashCode 为什么要一起重写？",
+    "answer": "相等对象必须有相同 hashCode，否则 HashMap、HashSet 的桶定位会失效；hash 相同对象未必相等。equals 应满足自反、对称、传递、一致性。用作哈希键的字段在存放期间应保持不变。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "Java 高频八股",
+    "question": "volatile 能保证什么，不能保证什么？",
+    "answer": "volatile 保证变量读写的可见性，并限制相关重排序；单次读写具有相应内存语义。它不保证 count++ 这类读改写复合操作的原子性；此时用 AtomicInteger、锁或其他同步机制。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "Java 高频八股",
+    "question": "synchronized 和 ReentrantLock 的主要差异是什么？",
+    "answer": "两者都可提供互斥和可见性。synchronized 由 JVM 管理锁释放；ReentrantLock 需要 finally 手动 unlock，支持可中断获取、限时尝试、公平策略和多个 Condition。选择后者时必须确保异常路径释放锁。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "Java 高频八股",
+    "question": "线程池核心参数如何影响任务排队与拒绝？",
+    "answer": "corePoolSize 决定核心线程数；核心线程忙时任务进入队列，队列满后扩到 maximumPoolSize，再满则触发拒绝策略。keepAliveTime 控制非核心空闲线程回收。无界队列可能堆积内存；要结合任务时长、吞吐、下游容量与监控设置边界。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "Java 高频八股",
+    "question": "JVM 堆内存持续上涨时如何定位？",
+    "answer": "先看 GC 次数、暂停、堆使用和进程内存，区分正常缓存增长与无法回收。再在合规环境获取 heap dump，按保留大小和引用链定位对象，核对缓存、集合、监听器及线程本地变量。也要检查堆外内存，不能只凭堆曲线认定泄漏。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "Java 高频八股",
+    "question": "什么情况下会发生类加载器双亲委派？有什么价值？",
+    "answer": "典型类加载器先把加载请求交给父加载器，父方找不到时自身再加载。这样能优先复用核心类，减少重复定义并保护基础类边界。某些容器或插件体系会有有意的例外；不能说所有类加载器都严格如此。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "Java 高频八股",
+    "question": "Spring Bean 默认是什么作用域？单例一定线程安全吗？",
+    "answer": "Spring Bean 默认 singleton，指每个容器内该 Bean 通常只有一个实例，不等于全局唯一。单例没有自动线程安全保证；无状态组件更容易安全共享，可变状态需同步、隔离或移出 Bean。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "Java 高频八股",
+    "question": "Spring 声明式事务为什么可能失效？",
+    "answer": "常见原因包括同类方法自调用绕过代理、方法未被代理拦截、异常被吞掉、传播配置不符或数据库操作不在同一事务管理器下。应确认代理调用路径、回滚规则和事务边界，并通过集成测试验证实际提交与回滚。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "Java 高频八股",
+    "question": "Spring 事务传播 REQUIRED 与 REQUIRES_NEW 有何区别？",
+    "answer": "REQUIRED 有现有事务就加入，否则新建；REQUIRES_NEW 总是开启独立事务，并挂起外层事务。内层提交后外层回滚不会自动撤销内层结果；还要考虑连接池容量和业务一致性。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "Java 高频八股",
+    "question": "MySQL 联合索引的最左前缀如何理解？",
+    "answer": "B+Tree 联合索引按列顺序组织。例如 (a,b,c) 可支持从 a 开始的前缀条件；若跳过 a，通常无法直接利用该索引的前缀定位。范围条件后的列能否用于定位受查询和优化器影响，应以 EXPLAIN 与实际执行计划验证。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "Java 高频八股",
+    "question": "MVCC 如何帮助 InnoDB 实现一致性读？",
+    "answer": "InnoDB 通过版本信息、undo log 与 Read View 选择事务可见版本，使普通一致性读无需对每行加读锁。RC 通常每条语句建立快照，RR 通常事务首次一致性读建立快照；锁定读的语义不同，具体以隔离级别和语句为准。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "Java 高频八股",
+    "question": "数据库慢查询怎样系统排查？",
+    "answer": "先确认慢查询日志、调用量、耗时分布和数据规模；用 EXPLAIN ANALYZE 或执行计划看扫描行数、索引、排序、回表与连接顺序。再检查统计信息、参数与锁等待。优化后用代表性数据验证，避免只凭“加索引”判断。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "Java 高频八股",
+    "question": "Redis 缓存穿透、击穿和雪崩分别是什么？",
+    "answer": "穿透是请求不存在的数据并持续落库，可缓存空值或用布隆过滤器；击穿是热点键失效导致并发回源，可错峰过期、互斥重建或逻辑过期；雪崩是大量键同时失效或缓存服务故障，可加过期抖动、多级缓存、限流和降级。措施需按一致性要求选。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "Java 高频八股",
+    "question": "缓存更新时如何降低数据库与缓存不一致？",
+    "answer": "常见做法是先更新数据库，成功后删除缓存，再由读请求重建；需处理删除失败、并发旧值回填和短暂不一致。可用重试消息、延迟补偿、版本校验或更强一致性方案。先说明业务可接受的一致性窗口。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "Java 高频八股",
+    "question": "Redis 分布式锁有哪些关键边界？",
+    "answer": "用 SET key value NX PX ttl 原子加锁，以唯一标识和 Lua 原子校验后释放；业务耗时超过 TTL 可能出现并发持锁，应考虑续租或 fencing token。锁不能单独替代数据库约束和幂等，可靠性要求高时要分析故障模式。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "Java 高频八股",
+    "question": "Kafka 消费者组如何分配分区？重复消费如何应对？",
+    "answer": "同一组内一个分区在同一时刻由一个消费者处理；组成员变化会重平衡。至少一次处理下，业务完成但 offset 未提交会重放。用业务唯一键、去重表或条件更新做消费端幂等，并确保处理与提交顺序合理。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "Java 高频八股",
+    "question": "HTTP 请求超时该如何区分连接、读取和业务超时？",
+    "answer": "连接超时是建立连接阶段超限，读取超时是等待响应数据超限，业务端到端超时涵盖排队、重试和下游。设置总预算与各层超时，结合链路追踪和指标定位；重试仅用于可安全重试的操作并控制放大。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "后端场景",
+    "question": "热点商品缓存失效导致数据库流量突增，如何处理？",
+    "answer": "先用监控确认热点键和回源量，临时限流/降级保护数据库；重建时做单飞或互斥，给缓存设置合理 TTL 与抖动。长期可加热点预热和容量规划。注意锁超时、失败回退及数据新鲜度边界。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "后端场景",
+    "question": "消息队列重复投递导致订单状态重复更新，如何设计消费端？",
+    "answer": "以消息或业务操作的唯一键做幂等，数据库中用唯一约束或带预期状态的条件更新，业务写入与消费记录尽量同事务。失败可重试并进死信队列，但要限制次数、保留排查信息；不要依赖“消息只会投递一次”。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "后端场景",
+    "question": "线上接口突然变慢，你会按什么顺序排查？",
+    "answer": "先看影响范围、错误率和发布变更，分解入口排队、应用 CPU/GC、连接池、数据库慢 SQL 与外部依赖耗时。用链路追踪找瓶颈；必要时回滚、限流或降级止损。修复后用指标验证并复盘。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "后端场景",
+    "question": "分页查询随页码增大越来越慢，怎么改？",
+    "answer": "先确认执行计划和排序索引。OFFSET 深分页会扫描并丢弃大量记录；稳定排序可用基于 (排序字段,唯一 ID) 的游标分页，记录上次边界。若必须跳页，可考虑覆盖索引延迟关联；注意数据变动和排序稳定性。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "java",
+    "section": "后端场景",
+    "question": "同一用户并发提交相同请求造成重复创建，如何防重？",
+    "answer": "客户端防重复只能改善体验；服务端用请求幂等键和唯一约束，检查处理状态并返回同一结果。写入与幂等记录需保证原子性，明确键有效期与请求参数冲突处理。对外部调用还需补偿或对方幂等支持。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "agent",
+    "section": "Agent 场景",
+    "question": "Agent 调用工具超时后不确定操作是否成功，如何处理？",
+    "answer": "为有副作用工具提供幂等键、状态查询和明确超时；超时后先查结果再决定重试，避免盲目重复执行。限制重试次数，记录调用 ID 和状态，必要时转人工确认。只读工具与写操作采用不同策略。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "agent",
+    "section": "Agent 场景",
+    "question": "RAG 回答引用了不相关文档，怎样定位与改善？",
+    "answer": "拆开检查文档切分、元数据过滤、召回、重排和生成阶段；用带标准答案及证据的样本评估 recall、证据命中与引用准确率。对低置信度检索要求模型说明证据不足，不能让模型编造引用。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "agent",
+    "section": "Agent 场景",
+    "question": "模型输出的 JSON 经常不符合格式，系统应如何处理？",
+    "answer": "优先用结构化输出能力，仍需本地 schema 校验；失败可带校验错误进行有限次数重试，最终返回明确失败或人工处理。不能把未校验文本直接传给有副作用工具，字段语义和权限也须检查。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "agent",
+    "section": "Agent 场景",
+    "question": "多步 Agent 任务中途失败，如何恢复且避免重复操作？",
+    "answer": "把步骤、输入、工具调用 ID、输出和状态持久化；恢复时从已确认完成的步骤继续。写操作使用幂等键或状态机，明确重试与补偿规则。上下文压缩后也要保留必要事实和可审计轨迹。"
+  },
+  {
+    "interview_type": "technical",
+    "topic": "agent",
+    "section": "Agent 场景",
+    "question": "如何评测 Agent 的工具调用质量和最终答案可靠性？",
+    "answer": "建立覆盖正常、边界和失败场景的数据集，分别评估工具选择、参数正确率、任务成功率、证据支持度、安全边界与成本/延迟。固定工具与模型版本做回归，辅以人工抽检；单一主观评分不足以说明可靠性。"
+  },
+  {
+    "interview_type": "hr",
+    "topic": "other",
+    "section": "HR 通用",
+    "question": "请用两分钟介绍自己，并说明与岗位最相关的经历。",
+    "answer": "按“岗位目标—相关技能—一个有证据的经历—希望承担的工作”组织，控制在两分钟内。项目名称、职责和结果只填本人真实事实；没有经历时讲课程或练习，不编造实习或指标。"
+  },
+  {
+    "interview_type": "hr",
+    "topic": "other",
+    "section": "HR 通用",
+    "question": "为什么选择 Java 后端或 Agent 岗位？",
+    "answer": "说明自己理解的岗位日常工作，连接真实学习、项目或实习经历，再说希望成长的能力。区分 Java 后端的服务与数据能力、Agent 的工具集成与可靠性能力；动机应由本人确认。"
+  },
+  {
+    "interview_type": "hr",
+    "topic": "other",
+    "section": "HR 通用",
+    "question": "你的一个优势是什么？请举具体例子。",
+    "answer": "选与岗位相关且能验证的优势，用“情境—自己的行动—结果—复盘”讲一个真实例子。避免只有形容词或把团队成果全算作个人成果；数字需有依据。"
+  },
+  {
+    "interview_type": "hr",
+    "topic": "other",
+    "section": "HR 通用",
+    "question": "你需要改进的地方是什么？正在怎么做？",
+    "answer": "选择真实且可改进的问题，说明具体影响、已采取的行动和当前变化。不要把岗位核心要求包装成缺点，也不要用“过于追求完美”代替反思。"
+  },
+  {
+    "interview_type": "hr",
+    "topic": "other",
+    "section": "HR 通用",
+    "question": "请讲一次和同事意见不同的经历，你怎样推进？",
+    "answer": "先交代分歧与共同目标，再说明如何听取对方、拿数据或小实验验证、形成决定并复盘。若没有职场经历，可用真实团队项目；不虚构冲突。"
+  },
+  {
+    "interview_type": "hr",
+    "topic": "other",
+    "section": "HR 通用",
+    "question": "请讲一次任务未达预期的经历，你如何复盘？",
+    "answer": "说明目标、本人职责、实际差距和原因，再讲补救、沟通与下一次的具体改进。承认责任但区分可控与不可控因素；结果和数据应真实。"
+  },
+  {
+    "interview_type": "hr",
+    "topic": "other",
+    "section": "HR 通用",
+    "question": "多项紧急任务同时出现，你怎样安排优先级？",
+    "answer": "先确认截止时间、影响范围、依赖和不可逆风险，与负责人对齐优先级；拆分最小交付，及时暴露冲突与进度。避免承诺同时完成全部任务，也要说明何时请求资源。"
+  },
+  {
+    "interview_type": "hr",
+    "topic": "other",
+    "section": "HR 通用",
+    "question": "为什么认为自己适合这个团队？",
+    "answer": "基于已了解的岗位职责，匹配自己的真实技能和工作方式；同时说明尚需补齐的一项能力及学习计划。对不了解的团队文化或内部制度不要推断。"
+  },
+  {
+    "interview_type": "hr",
+    "topic": "other",
+    "section": "HR 通用",
+    "question": "你未来三年的职业规划是什么？",
+    "answer": "围绕岗位给出阶段目标：先胜任基础交付与质量要求，再独立负责模块，之后提升系统设计与协作能力。规划应与自身兴趣和企业实际相符，避免空泛职位承诺。"
+  },
+  {
+    "interview_type": "hr",
+    "topic": "other",
+    "section": "HR 通用",
+    "question": "你还有什么想向面试官了解的？",
+    "answer": "优先问岗位实际任务、团队协作方式、质量标准和入职后的学习路径。根据面试中已获得的信息调整提问，避免重复问已明确的事项；薪酬等可在适当环节坦诚沟通。"
+  }
+]
