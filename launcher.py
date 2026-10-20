@@ -14,10 +14,16 @@ def choose_port():
         return sock.getsockname()[1]
 
 
+def make_server(port):
+    # Windowed executables have no stdout/stderr; Uvicorn's default formatter
+    # calls isatty() on those streams while configuring logging.
+    config=uvicorn.Config(app,host="127.0.0.1",port=port,access_log=False,log_level="error",log_config=None)
+    return uvicorn.Server(config)
+
+
 def main():
     port=choose_port()
-    config=uvicorn.Config(app,host="127.0.0.1",port=port,access_log=False,log_level="error")
-    server=uvicorn.Server(config)
+    server=make_server(port)
     thread=threading.Thread(target=server.run,daemon=True)
     thread.start()
     for _ in range(100):
