@@ -30,6 +30,10 @@ jobs:
       - run: python packaging/audit.py
       - run: python -m unittest discover -s tests
       - run: python packaging/build.py
+      - run: python -m pip install psutil
+        if: runner.os == 'Windows'
+      - run: python packaging/smoke_windows.py
+        if: runner.os == 'Windows'
       - run: python packaging/audit.py dist
       - uses: actions/upload-artifact@v4
         with:
