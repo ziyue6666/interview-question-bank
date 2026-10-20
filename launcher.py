@@ -33,6 +33,10 @@ def main():
         if not thread.is_alive():
             raise RuntimeError("本地题库服务未能启动")
         time.sleep(0.1)
+    if not server.started:
+        server.should_exit=True
+        thread.join(timeout=5)
+        raise RuntimeError("本地题库服务启动超时，请重试")
     thread.join()
 
 

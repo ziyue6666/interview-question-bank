@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 root=Path(__file__).resolve().parents[1]
-private=[b'/Users/'+b'zya',b'184'+b'73',b'Campus'+b'Flow',b'vcn'+b'07g4',b'tail'+b'scale-origin',b'InterviewQuestionBank.'+b'DeepSeek']
+private=[b'/Users/'+b'zya',b'184'+b'73',b'Campus'+b'Flow',b'vcn'+b'07g4',b'InterviewQuestionBank.'+b'DeepSeek']
 source_excludes={'.venv','build','dist','work','.git','__pycache__'}
 
 def inspect(path):

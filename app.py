@@ -6,8 +6,12 @@ import random
 import re
 import secrets
 import sqlite3
+import subprocess
 import threading
+import tempfile
+import socket
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
 from contextlib import contextmanager
@@ -20,10 +24,12 @@ from fastapi import UploadFile, File
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 import parser as source_parser
+import backup_format
+import resume_facts
 
 ROOT = Path(__file__).resolve().parent
 DATA = Path(os.environ.get("INTERVIEW_DATA_DIR") or user_data_dir("InterviewQuestionBankOpen", "InterviewQuestionBankOpen"))
@@ -31,6 +37,10 @@ DATA.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA / "interview.sqlite3"
 TZ = ZoneInfo("Asia/Shanghai")
 MODEL = "deepseek-flash"
+KEYRING_SERVICE=os.environ.get("INTERVIEW_KEYRING_SERVICE","InterviewQuestionBankOpen.DeepSeek")
+KEYRING_ACCOUNT=os.environ.get("INTERVIEW_KEYRING_ACCOUNT","current-user")
+SOURCE_DEFAULTS = {"personal": 40, "network": 30, "ai": 30}
+AI_DEFAULTS = {"fundamentals": 60, "backend_scenario": 20, "agent_fundamentals": 10, "agent_scenario": 10, "project": 0}
 LOCK = threading.RLock()
 app = FastAPI(title="面试题库助手开源版", docs_url=None, redoc_url=None)
 
@@ -104,7 +114,13 @@ def init_db():
         job_columns={r["name"] for r in c.execute("PRAGMA table_info(import_jobs)")}
         if "source_text" not in job_columns:
             c.execute("ALTER TABLE import_jobs ADD COLUMN source_text TEXT NOT NULL DEFAULT ''")
-        c.execute("INSERT OR IGNORE INTO settings VALUES('weights','{\"agent\":55,\"java\":35,\"other\":10}')")
+        c.execute("INSERT OR IGNORE INTO settings VALUES('source_weights',?)",(json.dumps(SOURCE_DEFAULTS),))
+        c.execute("INSERT OR IGNORE INTO settings VALUES('ai_weights',?)",(json.dumps(AI_DEFAULTS),))
+        c.execute("DELETE FROM settings WHERE key='weights'")
+        for row in c.execute("SELECT version,facts FROM resume_profiles").fetchall():
+            plain=resume_facts.normalize(row["facts"])
+            if plain != row["facts"]:
+                c.execute("UPDATE resume_profiles SET facts=? WHERE version=?",(plain,row["version"]))
 
 init_db()
 
@@ -121,13 +137,22 @@ async def errors(_, exc):
 @app.middleware("http")
 async def local_only(request: Request, call_next):
     host=request.headers.get("host", "")
-    if host.split(":")[0] not in ("127.0.0.1", "localhost", "testserver"):
+    allowed_hosts={"127.0.0.1","localhost","testserver"}
+    allowed_origins={"http://"+host,"http://127.0.0.1:"+host.split(":")[-1],"http://localhost:"+host.split(":")[-1]}
+    origin_file=DATA/"tailscale-origin.txt"
+    if origin_file.exists():
+        remote_origin=origin_file.read_text(encoding="utf-8").strip()
+        parsed=urllib.parse.urlsplit(remote_origin)
+        if parsed.scheme=="https" and parsed.hostname and re.fullmatch(r"[a-z0-9-]+(?:\.[a-z0-9-]+)+\.ts\.net",parsed.hostname) and not parsed.path.strip("/"):
+            allowed_hosts.add(parsed.hostname)
+            allowed_origins.add(remote_origin)
+    if host.split(":")[0] not in allowed_hosts:
         return JSONResponse(status_code=403,content={"code":"HOST","message":"仅允许本机访问"})
     origin=request.headers.get("origin")
-    if origin and origin.rstrip("/") not in ("http://"+host, "http://127.0.0.1:"+host.split(":")[-1], "http://localhost:"+host.split(":")[-1]):
+    if origin and origin.rstrip("/") not in allowed_origins:
         return JSONResponse(status_code=403,content={"code":"ORIGIN","message":"仅允许当前题库页面操作"})
     path=request.url.path
-    public=(path in ("/api/health","/api/setup/status","/api/setup/key") or path.startswith("/static/") or path=="/")
+    public=(path in ("/api/health","/api/setup/status","/api/setup/key","/api/backup/export","/api/backup/import") or path.startswith("/static/") or path=="/")
     if path.startswith("/api/") and not public and not key_get():
         return JSONResponse(status_code=403,content={"code":"SETUP_REQUIRED","message":"请先验证并配置本人的 DeepSeek API Key"})
     return await call_next(request)
@@ -135,21 +160,31 @@ async def local_only(request: Request, call_next):
 
 def key_get():
     try:
-        return keyring.get_password("InterviewQuestionBankOpen.DeepSeek", "current-user") or ""
+        if os.environ.get("INTERVIEW_KEYRING_BACKEND")=="security":
+            result=subprocess.run(["/usr/bin/security","find-generic-password","-s",KEYRING_SERVICE,"-a",KEYRING_ACCOUNT,"-w"],capture_output=True,text=True,timeout=5)
+            return result.stdout.strip() if result.returncode==0 else ""
+        return keyring.get_password(KEYRING_SERVICE,KEYRING_ACCOUNT) or ""
     except Exception:
         return ""
 
 
 def key_set(value):
     try:
-        keyring.set_password("InterviewQuestionBankOpen.DeepSeek", "current-user", value)
+        if os.environ.get("INTERVIEW_KEYRING_BACKEND")=="security":
+            result=subprocess.run(["/usr/bin/security","add-generic-password","-U","-s",KEYRING_SERVICE,"-a",KEYRING_ACCOUNT,"-w",value],capture_output=True,timeout=5)
+            if result.returncode: fail("KEYCHAIN_ERROR","无法写入系统凭据存储")
+            return
+        keyring.set_password(KEYRING_SERVICE,KEYRING_ACCOUNT,value)
     except Exception:
         fail("KEYCHAIN_ERROR", "无法写入系统凭据存储")
 
 
 def key_delete():
     try:
-        keyring.delete_password("InterviewQuestionBankOpen.DeepSeek", "current-user")
+        if os.environ.get("INTERVIEW_KEYRING_BACKEND")=="security":
+            subprocess.run(["/usr/bin/security","delete-generic-password","-s",KEYRING_SERVICE,"-a",KEYRING_ACCOUNT],capture_output=True,timeout=5)
+            return
+        keyring.delete_password(KEYRING_SERVICE,KEYRING_ACCOUNT)
     except keyring.errors.PasswordDeleteError:
         pass
     except Exception:
@@ -167,11 +202,7 @@ def facts_text(c):
 
 def resume_projects(c):
     profile=resume_current(c)
-    if not profile: return []
-    try:
-        return [x for x in json.loads(profile["facts"]).get("projects",[]) if isinstance(x,dict) and x.get("name")]
-    except (ValueError,TypeError):
-        return []
+    return resume_facts.projects(profile["facts"]) if profile else []
 
 
 def verify_key(value):
@@ -182,7 +213,7 @@ def verify_key(value):
     except urllib.error.HTTPError as exc:
         if exc.code in (401,403): fail("KEY_INVALID","密钥验证失败，请检查 DeepSeek API Key",400)
         fail("KEY_VERIFY_FAILED","DeepSeek 暂时无法验证密钥，请稍后重试",503,True)
-    except urllib.error.URLError:
+    except (urllib.error.URLError, TimeoutError, socket.timeout):
         fail("KEY_VERIFY_FAILED","无法连接 DeepSeek，请联网后重试",503,True)
 
 
@@ -215,13 +246,73 @@ def ai_json(system, prompt, max_tokens=1100):
             payload = json.loads(res.read(2_000_000))
         choice = payload["choices"][0]
         if choice.get("finish_reason") == "length":
-            raise ValueError("truncated")
-        return json.loads(choice["message"]["content"])
+            fail("MODEL_TRUNCATED", "DeepSeek 回答被截断，请重试", 503, True)
+        content=choice["message"]["content"]
+        if not isinstance(content,str) or not content.strip():
+            fail("MODEL_EMPTY", "DeepSeek 返回空内容，请重试", 503, True)
+        result=json.loads(content)
+        if not isinstance(result,dict):
+            fail("MODEL_FORMAT", "DeepSeek 返回格式不正确，请重试", 503, True)
+        return result
     except urllib.error.HTTPError as e:
+        if e.code==402: fail("BALANCE_LOW", "DeepSeek 账户余额不足，请充值后重试", 402)
         if e.code in (401,403): fail("KEY_INVALID","DeepSeek 密钥已失效，请在设置中更新",401)
-        fail("MODEL_UNAVAILABLE", "DeepSeek 暂不可用，请稍后重试", 503, True)
-    except (urllib.error.URLError, ValueError, KeyError, json.JSONDecodeError):
-        fail("MODEL_UNAVAILABLE", "DeepSeek 暂不可用，请稍后重试", 503, True)
+        if e.code in (400,422): fail("MODEL_REQUEST", "DeepSeek 拒绝了请求参数，请检查模型设置", 502)
+        if e.code==429: fail("MODEL_RATE_LIMIT", "DeepSeek 请求过于频繁，请稍后重试", 503, True)
+        fail("MODEL_UNAVAILABLE", f"DeepSeek 服务暂不可用（HTTP {e.code}），请稍后重试", 503, True)
+    except (urllib.error.URLError, TimeoutError, socket.timeout):
+        fail("MODEL_TIMEOUT", "连接 DeepSeek 超时，请稍后重试", 503, True)
+    except (ValueError, KeyError, IndexError, TypeError):
+        fail("MODEL_FORMAT", "DeepSeek 响应格式不正确，请重试", 503, True)
+
+
+@app.get("/api/backup/export")
+def export_backup():
+    with LOCK, db() as c:
+        content=backup_format.dumps(c)
+    filename=f"interview-backup-{today()}.json"
+    return Response(content,media_type="application/json",headers={"Content-Disposition":f'attachment; filename="{filename}"'})
+
+
+@app.post("/api/backup/import")
+async def import_backup(file: UploadFile=File(...)):
+    blob=await file.read(100_000_001)
+    if len(blob)>100_000_000: fail("BACKUP_TOO_LARGE","备份文件超过 100 MB")
+    try:
+        payload=json.loads(blob.decode("utf-8"))
+    except (UnicodeError,ValueError):
+        fail("BACKUP_INVALID","备份不是有效的 UTF-8 JSON 文件")
+    with LOCK:
+        with tempfile.TemporaryDirectory(prefix="interview-restore-",dir=DATA) as folder:
+            stage=sqlite3.connect(Path(folder)/"stage.sqlite3",isolation_level=None)
+            original=sqlite3.connect(DB_PATH,timeout=30,isolation_level=None)
+            previous=sqlite3.connect(Path(folder)/"before.sqlite3",isolation_level=None)
+            try:
+                original.backup(stage)
+                try:
+                    backup_format.restore_connection(stage,payload)
+                except (ValueError,sqlite3.Error) as exc:
+                    fail("BACKUP_INVALID",f"备份校验失败：{exc}")
+                for key,value in (("source_weights",SOURCE_DEFAULTS),("ai_weights",AI_DEFAULTS)):
+                    stage.execute("INSERT OR IGNORE INTO settings VALUES(?,?)",(key,json.dumps(value)))
+                stage.execute("DELETE FROM settings WHERE key='weights'")
+                original.backup(previous)
+                backup_dir=DATA/"backups"
+                backup_dir.mkdir(exist_ok=True)
+                backup_path=backup_dir/f"before-import-{now().strftime('%Y%m%d-%H%M%S')}-{uid()[:6]}.sqlite3"
+                disk=sqlite3.connect(backup_path)
+                try: previous.backup(disk)
+                finally: disk.close()
+                try:
+                    stage.backup(original)
+                    if original.execute("PRAGMA integrity_check").fetchone()[0]!="ok":
+                        raise sqlite3.DatabaseError("导入后完整性检查失败")
+                except Exception:
+                    previous.backup(original)
+                    raise
+                return {"ok":True,"before_import_backup":str(backup_path),"groups":len(payload["tables"]["groups"]),"questions":len(payload["tables"]["questions"])}
+            finally:
+                stage.close();previous.close();original.close()
 
 
 def insert_group(c, payload, bank="personal"):
@@ -323,11 +414,11 @@ def generate_reference_answer(c,qid):
                 "回答当前追问时，明确承接前一问的具体问题和已保存答案，结合用户最近提出的侧重点；"
                 "不要重复整段前文，也不要把未确认的提议写成既成事实。" if previous else "")
     if q["interview_type"]=="hr":
-        system="你是应届生 HR 面试辅导员。给出自然、具体、可口述的回答框架，先回应问题，再说明如何用真实经历支撑，最后连接岗位；不编造个人经历、单位制度或承诺。"
-        prompt=f"HR 面试题：{q['text']}。{continuity}已知简历事实：{facts_text(c)}。仅使用相关且确知的事实，缺少的个人动机或例子用【需本人补充】提示。输出 JSON: {{\"answer\":\"回答框架\"}}"
+        system="你是应届生 HR 面试辅导员。只回答当前问题，简洁但全面、自然可口述。纯文本，不用 Markdown 标题、星号或列表语法；不编造个人经历、单位制度或承诺。"
+        prompt=f"当前 HR 面试题：{q['text']}。{continuity}已知简历事实：{facts_text(c)}。只使用相关且确知的事实，缺少个人动机或例子用【需本人补充】提示。输出 JSON：{{\"answer\":\"答案\"}}"
     else:
-        system="你是技术面试辅导员，答案准确、可口述、按要点组织，明确区分事实和假设，不编造项目经历。"
-        prompt=f"技术面试题：{q['text']}。{continuity}简历事实：{facts_text(c)}。先给直接结论，再解释关键原理与适用条件；场景题给排查或设计顺序。输出 JSON: {{\"answer\":\"分点答案\"}}"
+        system="你是技术面试辅导员。直接回答当前题，准确、简洁但全面，适合面试口述。只用纯文本自然段，不使用 Markdown 标题、星号、井号或列表语法。不自行扩展额外排查流程，不另造场景题；只有题目明确问排查时才回答排查。明确区分事实与假设，不编造项目经历。"
+        prompt=f"当前技术面试题：{q['text']}。{continuity}相关简历事实：{facts_text(c)}。先直接回应题目，再说明必要原理和适用条件；严格围绕当前题。输出 JSON：{{\"answer\":\"答案\"}}"
     result=ai_json(system,prompt,1800 if previous else 1500)
     value=result.get("answer","")
     if not isinstance(value,str) or not value.strip(): fail("ANSWER_GENERATION_FAILED","答案生成失败，请重试",503,True)
@@ -358,6 +449,7 @@ def choose_weighted(items, weights):
 AI_CATEGORY_LABELS = {
     "fundamentals": "高频八股",
     "backend_scenario": "后端场景设计",
+    "agent_fundamentals": "Agent 八股",
     "agent_scenario": "Agent 场景设计",
     "project": "项目深挖",
 }
@@ -367,7 +459,13 @@ AI_BLUEPRINTS = {
         ("java", "线程池核心参数与任务堆积"), ("java", "Spring 事务失效的常见原因"),
         ("java", "MySQL 联合索引和最左前缀"), ("java", "MVCC 与事务隔离级别"),
         ("java", "Redis 缓存穿透、击穿和雪崩的区别"), ("java", "Kafka 消费者组与重复消费"),
-        ("agent", "RAG 检索、重排与引用依据"), ("agent", "Agent 工具调用与普通文本生成的区别"),
+    ],
+    "agent_fundamentals": [
+        ("agent", "Agent 的规划、工具调用与观察循环"),
+        ("agent", "RAG 的召回、重排与引用依据"),
+        ("agent", "Function Calling 参数校验与权限边界"),
+        ("agent", "短期上下文与长期记忆的区别"),
+        ("agent", "Agent 评测中的任务成功率与工具调用准确率"),
     ],
     "backend_scenario": [
         ("java", "接口超时：区分应用、数据库和外部依赖"),
@@ -394,11 +492,10 @@ AI_BLUEPRINTS = {
 def choose_ai_category(c, allowed=None):
     if allowed:
         return random.choice(allowed)
-    counts={r["section"]:r["n"] for r in rows(c,"SELECT section,COUNT(*) n FROM groups WHERE bank='ai' AND interview_type='technical' GROUP BY section")}
-    total=sum(counts.get(label,0) for label in AI_CATEGORY_LABELS.values())+1
-    targets={"fundamentals":.45,"backend_scenario":.275,"agent_scenario":.275}
-    if resume_projects(c): targets["project"]=.10
-    return choose_weighted(list(targets),{key:max(.1,share*total-counts.get(AI_CATEGORY_LABELS[key],0)+.5) for key,share in targets.items()})
+    weights=json.loads(one(c,"SELECT value FROM settings WHERE key='ai_weights'")["value"])
+    available={key:value for key,value in weights.items() if key in AI_CATEGORY_LABELS and isinstance(value,(int,float)) and value>0 and (key!="project" or resume_projects(c))}
+    if not available: fail("NO_AI_DIRECTION","请在刷题页选择至少一个权重大于 0 的 AI 出题方向",409)
+    return choose_weighted(list(available),available)
 
 
 def generate_ai_question(c, mode="technical", category=None, focus="all"):
@@ -424,10 +521,10 @@ def generate_ai_question(c, mode="technical", category=None, focus="all"):
             projects=resume_projects(c)
             if not projects: fail("RESUME_REQUIRED","请先在设置中确认简历，再生成个人项目深挖题",409)
             project=random.choice(projects)
-            topic=source_parser.topic_for(json.dumps(project,ensure_ascii=False))
-            seed=json.dumps(project,ensure_ascii=False)
+            topic=source_parser.topic_for(project["details"])
+            seed=project["details"]
         else: topic,seed=random.choice(AI_BLUEPRINTS[category])
-        special=("只问一个经典知识点，考察原理及适用边界，不写成项目题。" if category=="fundamentals" else
+        special=("只问一个经典知识点，考察原理及适用边界，不写成项目题。" if category in ("fundamentals","agent_fundamentals") else
                  "给出一个常见、规模适中的工作场景，只问排查或设计中的一个核心决策。" if category in ("backend_scenario","agent_scenario") else
                  "必须明确点名种子中的那个真实项目或实现，只围绕已给事实问一个具体设计决策、原因或权衡；不得添加没有提供的业务事实。")
         prompt=(f"出题类型：{section}；指定考点：{seed}；方向：{topic}。{special}"
@@ -464,46 +561,52 @@ def draw(c, mode="technical", focus="all"):
     active=current(c,mode,focus)
     if active: return card(c,active)
     day=today()
-    has_key=bool(key_get())
-    answer_filter="" if has_key else " AND NOT EXISTS(SELECT 1 FROM questions x JOIN answers a ON a.question_id=x.id WHERE x.group_id=g.id AND x.status='active' AND a.primary_text='')"
     focus_filter=hr_focus_sql(focus) if mode=="hr" else ""
-    due=rows(c,"""SELECT g.id,MIN(s.due_on) due_on FROM groups g JOIN questions q ON q.group_id=g.id JOIN schedules s ON s.question_id=q.id WHERE g.status='active' AND g.interview_type=? AND q.status='active' AND s.due_on<=? AND NOT EXISTS(SELECT 1 FROM events e WHERE e.group_id=g.id AND e.local_day=? AND e.action='feedback')"""+focus_filter+answer_filter+" GROUP BY g.id ORDER BY due_on LIMIT 10",(mode,day,day))
-    kind="review" if mode=="technical" else "hr_review"
+    common="g.status='active' AND g.interview_type=? AND q.status='active' AND NOT EXISTS(SELECT 1 FROM events e WHERE e.group_id=g.id AND e.local_day=? AND e.action='feedback')"+focus_filter
+    due=rows(c,"""SELECT DISTINCT g.id,g.bank,g.section,q.id question_id,s.due_on,COALESCE(a.primary_text,'') answer FROM groups g JOIN questions q ON q.group_id=g.id JOIN schedules s ON s.question_id=q.id LEFT JOIN answers a ON a.question_id=q.id WHERE """+common+" AND s.due_on<=? ORDER BY s.due_on",(mode,day,day))
+    fresh=rows(c,"""SELECT g.id,g.bank,g.section,q.id question_id,COALESCE(a.primary_text,'') answer FROM groups g JOIN questions q ON q.group_id=g.id AND q.position=0 LEFT JOIN answers a ON a.question_id=q.id WHERE """+common+" AND NOT EXISTS(SELECT 1 FROM schedules s WHERE s.question_id=q.id)",(mode,day))
     if not resume_projects(c):
-        due=[item for item in due if one(c,"SELECT section FROM groups WHERE id=?",(item["id"],))["section"]!="项目深挖"]
-    if due:
-        gid=random.choice(due[:min(3,len(due))])["id"]
-    else:
-        kind="new" if mode=="technical" else "hr_"+focus+"_new"
-        candidates=rows(c,"""SELECT g.id,g.bank,g.topic FROM groups g JOIN questions q ON q.group_id=g.id AND q.position=0 WHERE g.status='active' AND g.interview_type=? AND g.bank IN ('personal','network') AND NOT EXISTS(SELECT 1 FROM schedules s WHERE s.question_id=q.id) AND NOT EXISTS(SELECT 1 FROM events e WHERE e.group_id=g.id AND e.local_day=?)"""+focus_filter+answer_filter,(mode,day))
-        bybank={b:[r for r in candidates if r["bank"]==b] for b in ("personal","network")}
-        available=[b for b in bybank if bybank[b]]
-        if has_key: available.append("ai")
-        if not available: return None
-        actual={r["bank"]:r["n"] for r in rows(c,"SELECT bank,COUNT(*) n FROM draws WHERE draw_kind=? GROUP BY bank",(kind,))}
-        total=sum(actual.values())+1
-        target={"personal":.4,"network":.3,"ai":.3} if mode=="technical" else {"personal":.35,"network":.35,"ai":.3}
-        normalizer=sum(target[b] for b in available)
-        priority={b:max(.05,target[b]/normalizer*total-actual.get(b,0)+.4) for b in available}
-        bank=choose_weighted(available,priority)
-        if bank=="ai":
+        due=[r for r in due if r["section"]!="项目深挖"]
+        fresh=[r for r in fresh if r["section"]!="项目深挖"]
+    bybank={b:{"review":[r for r in due if r["bank"]==b],"new":[r for r in fresh if r["bank"]==b]} for b in SOURCE_DEFAULTS}
+    has_key=bool(key_get())
+    ai_allowed=has_key and (mode=="hr" or any(v>0 for k,v in json.loads(one(c,"SELECT value FROM settings WHERE key='ai_weights'")["value"]).items() if k!="project" or resume_projects(c)))
+    if ai_allowed: bybank["ai"]["new"].append({"id":None,"answer":""})
+    weights=json.loads(one(c,"SELECT value FROM settings WHERE key='source_weights'")["value"])
+    available=[b for b in SOURCE_DEFAULTS if weights.get(b,0)>0 and (bybank[b]["review"] or bybank[b]["new"])]
+    if not available: return None
+    bank=choose_weighted(available,weights)
+    model_failed=False
+    while True:
+        choices=bybank[bank]
+        kind=random.choices(("review","new"),(60,40),k=1)[0]
+        if not choices[kind]: kind="new" if kind=="review" else "review"
+        pool=choices[kind]
+        if model_failed:
+            pool=[r for r in pool if r["answer"]]
+            if not pool:
+                kind="new" if kind=="review" else "review"
+                pool=[r for r in choices[kind] if r["answer"]]
+        answered=[r for r in pool if r["answer"]]
+        selected=random.choice(answered if not has_key and answered else pool)
+        gid=selected["id"]
+        qid=selected.get("question_id")
+        if gid is None:
             try: gid=generate_ai_question(c,mode,focus=focus)
             except HTTPException:
-                available=[b for b in available if b!="ai"]
-                if not available: raise
-                bank=choose_weighted(available,{b:target[b] for b in available})
-                gid=None
-        else: gid=None
-        if gid is None:
-            if mode=="technical":
-                weights=json.loads(one(c,"SELECT value FROM settings WHERE key='weights'")["value"])
-                gid=random.choices(bybank[bank],[max(1,weights.get(r["topic"],10)) for r in bybank[bank]],k=1)[0]["id"]
-            else:
-                gid=random.choice(bybank[bank])["id"]
-    main=one(c,"SELECT id FROM questions WHERE group_id=? AND position=0",(gid,))
+                bybank["ai"]["new"]=[r for r in bybank["ai"]["new"] if r["id"]]
+                fallback=[b for b in available if any(r["answer"] for group in bybank[b].values() for r in group)]
+                if not fallback: raise
+                bank=choose_weighted(fallback,weights)
+                model_failed=True
+                continue
+        break
+    kind=("review" if mode=="technical" else "hr_review") if kind=="review" else ("new" if mode=="technical" else "hr_"+focus+"_new")
+    if not qid:
+        qid=one(c,"SELECT id FROM questions WHERE group_id=? AND position=0",(gid,))["id"]
     g=one(c,"SELECT bank,topic FROM groups WHERE id=?",(gid,))
     c.execute("INSERT INTO draws VALUES(?,?,?,?,?,?,?)",(uid(),gid,g["bank"],g["topic"],kind,day,now().isoformat()))
-    return card(c,deliver(c,gid,main["id"],draw_kind=kind,mode=mode,focus=focus))
+    return card(c,deliver(c,gid,qid,draw_kind=kind,mode=mode,focus=focus))
 
 
 def next_in_group(c,d, want_followup=False,draft=""):
@@ -545,7 +648,7 @@ def assets(name: str):
 
 @app.get("/api/health")
 def health():
-    return {"ok":True,"app":"interview-question-bank-open"}
+    return {"ok":True,"app":os.environ.get("INTERVIEW_APP_NAME","interview-question-bank-open")}
 
 
 @app.get("/api/practice/current")
@@ -565,7 +668,7 @@ class AIQuestionRequest(BaseModel):
     mode: str="technical"
     focus: str="all"
     category: str=""
-    categories: list[str]=Field(default_factory=list,max_length=4)
+    categories: list[str]=Field(default_factory=list,max_length=5)
 
 
 @app.post("/api/practice/ai-question")
@@ -601,7 +704,21 @@ def reveal(delivery_id: str):
         a=answer(c,d["question_id"])
         q=one(c,"SELECT q.*,g.interview_type FROM questions q JOIN groups g ON g.id=q.group_id WHERE q.id=?",(d["question_id"],))
         if not a["primary_text"]:
-            generate_reference_answer(c,q["id"])
+            try:
+                generate_reference_answer(c,q["id"])
+            except HTTPException as exc:
+                if exc.status_code not in (503,502): raise
+                weights=json.loads(one(c,"SELECT value FROM settings WHERE key='source_weights'")["value"])
+                alternatives=rows(c,"""SELECT g.id,g.bank,q.id question_id FROM groups g JOIN questions q ON q.group_id=g.id AND q.position=0 JOIN answers a ON a.question_id=q.id
+                    WHERE g.status='active' AND q.status='active' AND g.interview_type=? AND g.id!=? AND a.primary_text!=''
+                    AND NOT EXISTS(SELECT 1 FROM events e WHERE e.group_id=g.id AND e.local_day=? AND e.action='feedback')""",(d["practice_mode"],d["group_id"],today()))
+                alternatives=[r for r in alternatives if weights.get(r["bank"],0)>0]
+                if alternatives:
+                    chosen=random.choices(alternatives,[weights[r["bank"]] for r in alternatives],k=1)[0]
+                    c.execute("UPDATE deliveries SET state='replaced' WHERE id=?",(delivery_id,))
+                    replacement=deliver(c,chosen["id"],chosen["question_id"],mode=d["practice_mode"],focus=d["focus"],draw_kind="fallback")
+                    return {"current":card(c,replacement),"notice":"DeepSeek 暂不可用，已换成有参考答案的题"}
+                raise
         elif q["interview_type"]=="technical" and a["primary_origin"]=="personal" and not a["ai_supplement"] and key_get():
             try:
                 result=ai_json("在不改动个人原文的前提下，仅补充必要的技术遗漏或纠错；没有则返回空字符串。",f"题目：{q['text']}。个人原文：{a['primary_text'][:6000]}。{facts_text(c)}。输出 JSON: {{\"supplement\":\"简短补充\"}}",450)
@@ -1158,7 +1275,7 @@ def record_due():
 @app.get("/api/records/source-mix")
 def source_mix():
     with db() as c:
-        return {"counts":rows(c,"SELECT bank,COUNT(*) count FROM draws WHERE draw_kind LIKE '%new' GROUP BY bank"),"target":{"personal":0,"network":70,"ai":30}}
+        return {"counts":rows(c,"SELECT bank,COUNT(*) count FROM draws GROUP BY bank"),"target":json.loads(one(c,"SELECT value FROM settings WHERE key='source_weights'")["value"])}
 
 
 def redact_resume(text):
@@ -1212,20 +1329,17 @@ def organize_resume(data: ResumeText):
     if len(value)<40: fail("NO_TEXT","简历内容不足以整理")
     result=ai_json("只从原文提取与 Java 后端/Agent 面试有关的可证事实。不得补写经历、成果、数字或联系人。只返回 JSON：target_role 字符串、skills 字符串数组、projects 数组，每项 name、role、stack、contributions、results 字符串。没有依据的字段用空值。",value,1800)
     if not isinstance(result,dict) or not isinstance(result.get("projects",[]),list): fail("ORGANIZE_FAILED","整理结果格式不正确，请重试",503,True)
-    return {"facts":result,"text_sent":value}
+    return {"facts":resume_facts.from_legacy(result),"text_sent":value}
 
 
 class ResumeFacts(BaseModel):
-    facts: dict
+    facts: str
 
 
 @app.put("/api/resume/confirm")
 def confirm_resume(data: ResumeFacts):
-    facts=data.facts
-    if not isinstance(facts.get("target_role",""),str) or not isinstance(facts.get("skills",[]),list) or not isinstance(facts.get("projects",[]),list):
-        fail("INVALID_FACTS","请检查整理后的字段格式")
-    if any(not isinstance(p,dict) or not isinstance(p.get("name",""),str) for p in facts["projects"]): fail("INVALID_FACTS","项目格式不正确")
-    value=json.dumps(facts,ensure_ascii=False)
+    value=data.facts.strip()
+    if not value: fail("INVALID_FACTS","请输入要确认的简历事实")
     if len(value)>30000: fail("FACTS_TOO_LONG","确认内容过长")
     with LOCK,db() as c:
         version=one(c,"SELECT value FROM settings WHERE key='resume_version_counter'")
@@ -1240,7 +1354,7 @@ def confirm_resume(data: ResumeFacts):
 def get_resume():
     with db() as c:
         profile=resume_current(c)
-        return {"version":profile["version"] if profile else 0,"facts":json.loads(profile["facts"]) if profile else None,"confirmed_at":profile["confirmed_at"] if profile else None,"skipped":bool(one(c,"SELECT value FROM settings WHERE key='resume_skipped'"))}
+        return {"version":profile["version"] if profile else 0,"facts":profile["facts"] if profile else None,"confirmed_at":profile["confirmed_at"] if profile else None,"skipped":bool(one(c,"SELECT value FROM settings WHERE key='resume_skipped'"))}
 
 
 @app.post("/api/resume/skip")
@@ -1281,21 +1395,42 @@ def regenerate_answer(question_id: str):
 @app.get("/api/settings")
 def get_settings():
     with db() as c:
-        return {"weights":json.loads(one(c,"SELECT value FROM settings WHERE key='weights'")["value"]),"model":MODEL,"deepseek_configured":bool(key_get())}
+        return {"source_weights":json.loads(one(c,"SELECT value FROM settings WHERE key='source_weights'")["value"]),"ai_weights":json.loads(one(c,"SELECT value FROM settings WHERE key='ai_weights'")["value"]),"model":MODEL,"deepseek_configured":bool(key_get())}
 
 
 class Weights(BaseModel):
-    agent: int
-    java: int
-    other: int
+    personal: int=Field(ge=0,le=100)
+    network: int=Field(ge=0,le=100)
+    ai: int=Field(ge=0,le=100)
 
 
-@app.put("/api/settings/topic-weights")
+@app.put("/api/settings/source-weights")
 def set_weights(data: Weights):
     values=data.model_dump()
-    if min(values.values())<0 or sum(values.values())!=100: fail("INVALID_WEIGHTS","三个方向权重合计必须为 100")
-    with db() as c:c.execute("UPDATE settings SET value=? WHERE key='weights'",(json.dumps(values),))
-    return {"weights":values}
+    if sum(values.values())!=100: fail("INVALID_WEIGHTS","三个来源权重合计必须为 100")
+    with db() as c:
+        usable=any(value>0 and (bool(key_get()) if bank=="ai" else bool(one(c,"SELECT id FROM groups WHERE bank=? AND status='active' LIMIT 1",(bank,)))) for bank,value in values.items())
+        if not usable: fail("NO_SOURCE","至少保留一个当前有题或可使用 AI 的来源")
+        c.execute("UPDATE settings SET value=? WHERE key='source_weights'",(json.dumps(values),))
+    return {"source_weights":values}
+
+
+class AiWeights(BaseModel):
+    fundamentals: int=Field(ge=0,le=100)
+    backend_scenario: int=Field(ge=0,le=100)
+    agent_fundamentals: int=Field(ge=0,le=100)
+    agent_scenario: int=Field(ge=0,le=100)
+    project: int=Field(ge=0,le=100)
+
+
+@app.put("/api/settings/ai-weights")
+def set_ai_weights(data: AiWeights):
+    values=data.model_dump()
+    if not any(values.values()): fail("INVALID_WEIGHTS","至少选择一个 AI 方向并设置大于 0 的权重")
+    with db() as c:
+        if values["project"] and not resume_projects(c): fail("RESUME_REQUIRED","请先确认简历，再启用项目深挖",409)
+        c.execute("UPDATE settings SET value=? WHERE key='ai_weights'",(json.dumps(values),))
+    return {"ai_weights":values}
 
 
 @app.put("/api/settings/deepseek-key")
@@ -1318,4 +1453,5 @@ def shutdown():
     return {"ok":True}
 
 
-seed_bank()
+if os.environ.get("INTERVIEW_SKIP_SEED")!="1":
+    seed_bank()

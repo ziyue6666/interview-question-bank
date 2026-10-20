@@ -2,6 +2,8 @@ name: Build and test local installers
 on:
   workflow_dispatch:
   push:
+    tags:
+      - 'v*'
     paths:
       - '*.py'
       - 'static/**'
@@ -9,6 +11,8 @@ on:
       - 'packaging/**'
       - 'requirements.txt'
       - '.github/workflows/build.yml'
+permissions:
+  contents: write
 jobs:
   bundle:
     strategy:
@@ -42,3 +46,18 @@ jobs:
         with:
           name: ${{ matrix.label }}
           path: dist/interview-question-bank-*.zip
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*'
+          merge-multiple: true
+          path: dist
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/interview-question-bank-*.zip --title "面试题库助手 $GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md

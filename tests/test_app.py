@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 import tempfile
 import unittest
@@ -50,14 +51,17 @@ class AppTests(unittest.TestCase):
 
     def test_b_resume_version_and_stale_answers(self):
         with patch.object(self.app,'key_get',return_value='fake'):
-            payload={'facts':{'target_role':'Java 后端','skills':['Java'],'projects':[{'name':'示例项目','role':'开发','stack':'Java','contributions':'实现接口','results':''}]}}
+            payload={'facts':'目标岗位：Java 后端\n技能：Java\n\n项目：示例项目\n角色：开发\n技术栈：Java\n本人贡献：实现接口'}
             self.assertEqual(self.client.put('/api/resume/confirm',json=payload).json()['version'],1)
+            self.assertEqual(self.client.get('/api/resume').json()['facts'],payload['facts'])
+            with self.app.db() as c:
+                self.assertEqual(self.app.resume_current(c)['facts'],payload['facts'])
             with self.app.db() as c:
                 gid=self.app.insert_group(c,{'text':'示例项目为什么选择该方案？','topic':'java','section':'项目深挖','interview_type':'technical','source_key':'test:project','provenance':'ai'},'ai')
                 c.execute('UPDATE groups SET resume_version=1 WHERE id=?',(gid,))
                 q=self.app.one(c,'SELECT id FROM questions WHERE group_id=?',(gid,))
                 c.execute("UPDATE answers SET primary_text='旧答案',primary_origin='ai',resume_version=1 WHERE question_id=?",(q['id'],))
-            payload['facts']['skills']=['Java','Spring']
+            payload['facts']=payload['facts'].replace('技能：Java','技能：Java、Spring')
             self.assertEqual(self.client.put('/api/resume/confirm',json=payload).json()['version'],2)
             with self.app.db() as c:
                 self.assertTrue(self.app.answer(c,q['id'])['stale_resume'])
@@ -120,6 +124,60 @@ class AppTests(unittest.TestCase):
             scanned=self.client.post('/api/resume/extract',files={'file':('scan.pdf',buffer.getvalue(),'application/pdf')})
             self.assertEqual(scanned.status_code,400)
             self.assertEqual(scanned.json()['code'],'NO_TEXT')
+
+    def test_e_full_backup_roundtrip_and_invalid_import(self):
+        with patch.object(self.app,'key_get',return_value='fake'):
+            before=self.client.get('/api/backup/export')
+            self.assertEqual(before.status_code,200)
+            payload=before.json()
+            self.assertFalse(any('secret' in row['key'].lower() for row in payload['tables']['settings']))
+            original_count=len(payload['tables']['groups'])
+            added=self.client.post('/api/banks/personal/questions',json={'text':'备份恢复验证题：事务如何提交？','answer':'提交事务。'})
+            self.assertEqual(added.status_code,200)
+            malformed=self.client.post('/api/backup/import',files={'file':('bad.json',b'{"format":"wrong"}','application/json')})
+            self.assertEqual(malformed.status_code,400)
+            corrupt=json.loads(before.content)
+            corrupt['tables']['questions'][0]['group_id']='missing-group'
+            rejected=self.client.post('/api/backup/import',files={'file':('orphan.json',json.dumps(corrupt).encode(),'application/json')})
+            self.assertEqual(rejected.status_code,400)
+            with self.app.db() as c:
+                self.assertEqual(self.app.one(c,'SELECT COUNT(*) n FROM groups')['n'],original_count+1)
+            legacy=json.loads(before.content)
+            legacy['tables']['resume_profiles']=[{'version':77,'facts':json.dumps({'target_role':'Java 后端','skills':['Java'],'projects':[{'name':'旧项目','contributions':'实现接口'}]},ensure_ascii=False),'confirmed_at':'2026-01-01T00:00:00'}]
+            converted=self.client.post('/api/backup/import',files={'file':('legacy.json',json.dumps(legacy,ensure_ascii=False).encode(),'application/json')})
+            self.assertEqual(converted.status_code,200,converted.text)
+            self.assertIn('项目：旧项目',self.client.get('/api/resume').json()['facts'])
+            restored=self.client.post('/api/backup/import',files={'file':('backup.json',before.content,'application/json')})
+            self.assertEqual(restored.status_code,200,restored.text)
+            self.assertEqual(restored.json()['groups'],original_count)
+            self.assertEqual(self.client.get('/api/backup/export').json(),payload)
+
+    def test_f_source_zero_excludes_due_reviews(self):
+        with patch.object(self.app,'key_get',return_value='fake'):
+            with self.app.db() as c:
+                c.execute("UPDATE deliveries SET state='ended' WHERE state='active'")
+                gid=self.app.insert_group(c,{'text':'测试个人来源到期复习题','answer':'已有答案','source_key':'test:due'},'personal')
+                qid=self.app.one(c,'SELECT id FROM questions WHERE group_id=?',(gid,))['id']
+                c.execute('INSERT INTO schedules VALUES(?,?,?,?)',(qid,'partial','2020-01-01','2020-01-01'))
+                for row in self.app.rows(c,"SELECT q.id FROM questions q JOIN groups g ON g.id=q.group_id WHERE g.bank='personal' AND q.position=0 AND q.id!=?",(qid,)):
+                    c.execute("INSERT OR IGNORE INTO schedules VALUES(?,'partial','2030-01-01','2020-01-01')",(row['id'],))
+            self.assertEqual(self.client.put('/api/settings/source-weights',json={'personal':100,'network':0,'ai':0}).status_code,200)
+            first=self.client.post('/api/practice/draw').json()['current']
+            self.assertEqual((first['bank'],first['group_id']),('personal',gid))
+            with self.app.db() as c:c.execute("UPDATE deliveries SET state='ended' WHERE state='active'")
+            self.assertEqual(self.client.put('/api/settings/source-weights',json={'personal':0,'network':100,'ai':0}).status_code,200)
+            second=self.client.post('/api/practice/draw').json()['current']
+            self.assertEqual(second['bank'],'network')
+            with self.app.db() as c:
+                c.execute("UPDATE deliveries SET state='ended' WHERE state='active'")
+                c.execute("UPDATE schedules SET due_on='2030-01-01' WHERE question_id=?",(qid,))
+                follow_gid=self.app.insert_group(c,{'text':'主问题','answer':'主答案','source_key':'test:follow-due','followups':[{'text':'到期追问','answer':'追问答案'}]},'personal')
+                questions=self.app.rows(c,'SELECT id,position FROM questions WHERE group_id=? ORDER BY position',(follow_gid,))
+                c.execute("INSERT INTO schedules VALUES(?,'partial','2030-01-01','2020-01-01')",(questions[0]['id'],))
+                c.execute("INSERT INTO schedules VALUES(?,'partial','2020-01-01','2020-01-01')",(questions[1]['id'],))
+            self.client.put('/api/settings/source-weights',json={'personal':100,'network':0,'ai':0})
+            follow=self.client.post('/api/practice/draw').json()['current']
+            self.assertEqual((follow['group_id'],follow['question_id']),(follow_gid,questions[1]['id']))
 
 
 if __name__=='__main__': unittest.main()
