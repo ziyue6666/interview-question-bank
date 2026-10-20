@@ -10,6 +10,7 @@ import threading
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 from io import BytesIO
@@ -47,12 +48,17 @@ def uid():
     return secrets.token_hex(12)
 
 
+@contextmanager
 def db():
     c = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None)
-    c.row_factory = sqlite3.Row
-    c.execute("PRAGMA foreign_keys=ON")
-    c.execute("PRAGMA journal_mode=WAL")
-    return c
+    try:
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA foreign_keys=ON")
+        c.execute("PRAGMA journal_mode=WAL")
+        with c:
+            yield c
+    finally:
+        c.close()
 
 
 def rows(c, query, params=()):
